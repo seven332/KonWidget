@@ -20,7 +20,9 @@ package com.hippo.konwidget;
  * Created by Hippo on 8/21/2016.
  */
 
+import android.content.ContentResolver;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -36,6 +38,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
+import android.os.Build;
 import android.support.annotation.DrawableRes;
 import android.support.annotation.IntDef;
 import android.support.annotation.NonNull;
@@ -43,16 +46,20 @@ import android.support.annotation.Nullable;
 import android.support.v4.graphics.drawable.DrawableCompat;
 import android.support.v4.view.ViewCompat;
 import android.support.v7.content.res.AppCompatResources;
+import android.text.TextUtils;
 import android.util.AttributeSet;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.View;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.List;
 
-// android-n-preview-5
+// android-7.0.0_r1
 
 /**
  * A fork of {@link android.widget.ImageView}.
@@ -65,6 +72,8 @@ import java.lang.annotation.RetentionPolicy;
  * Add {@link #getAspectRatio()} and {@link #setAspectRatio(float)}.
  */
 public class AdvImageView extends View {
+
+    private static final String LOG_TAG = AdvImageView.class.getSimpleName();
 
     @IntDef({SCALE_TYPE_MATRIX, SCALE_TYPE_FIT_XY, SCALE_TYPE_FIT_START,
             SCALE_TYPE_FIT_CENTER, SCALE_TYPE_FIT_END, SCALE_TYPE_CENTER,
@@ -103,7 +112,7 @@ public class AdvImageView extends View {
     private ColorFilter mColorFilter = null;
     private boolean mHasColorFilter = false;
     private int mAlpha = 255;
-    private int mViewAlphaScale = 256;
+    private final int mViewAlphaScale = 256;
     private boolean mColorMod = false;
 
     private Drawable mDrawable = null;
@@ -120,13 +129,15 @@ public class AdvImageView extends View {
     private Matrix mDrawMatrix = null;
 
     // Avoid allocations...
-    private RectF mTempSrc = new RectF();
-    private RectF mTempDst = new RectF();
+    private final RectF mTempSrc = new RectF();
+    private final RectF mTempDst = new RectF();
 
     private boolean mCropToPadding;
 
     private int mBaseline = -1;
     private boolean mBaselineAlignBottom = false;
+
+    private static TypedValue sTempValue;
 
     public AdvImageView(Context context) {
         super(context);
@@ -153,7 +164,7 @@ public class AdvImageView extends View {
         final TypedArray a = context.obtainStyledAttributes(
                 attrs, R.styleable.AdvImageView, defStyleAttr, defStyleRes);
 
-        Drawable d = a.getDrawable(R.styleable.AdvImageView_kon_src);
+        final Drawable d = a.getDrawable(R.styleable.AdvImageView_kon_src);
         if (d != null) {
             setImageDrawable(d);
         }
@@ -239,7 +250,7 @@ public class AdvImageView extends View {
 
     @Override
     public boolean hasOverlappingRendering() {
-        Drawable background = getBackground();
+        final Drawable background = getBackground();
         return (background != null && background.getCurrent() != null);
     }
 
@@ -395,9 +406,7 @@ public class AdvImageView extends View {
      * @param uri the Uri of an image, or {@code null} to clear the content
      */
     public void setImageURI(@Nullable Uri uri) {
-        if (mResource != 0 ||
-                (mUri != uri &&
-                        (uri == null || mUri == null || !uri.equals(mUri)))) {
+        if (mResource != 0 || (mUri != uri && (uri == null || mUri == null || !uri.equals(mUri)))) {
             updateDrawable(null);
             mResource = 0;
             mUri = uri;
@@ -647,8 +656,7 @@ public class AdvImageView extends View {
             return;
         }
 
-        Resources res = getResources();
-        if (res == null) {
+        if (getResources() == null) {
             return;
         }
 
@@ -658,29 +666,15 @@ public class AdvImageView extends View {
             try {
                 d = AppCompatResources.getDrawable(mContext, mResource);
             } catch (Exception e) {
-                Log.w("AdvImageView", "Unable to find resource: " + mResource, e);
+                Log.w(LOG_TAG, "Unable to find resource: " + mResource, e);
                 // Don't try again.
                 mUri = null;
             }
         } else if (mUri != null) {
-            InputStream stream = null;
-            try {
-                stream = mContext.getContentResolver().openInputStream(mUri);
-                d = Drawable.createFromStream(stream, null);
-            } catch (Exception e) {
-                Log.w("AdvImageView", "Unable to open content: " + mUri, e);
-            } finally {
-                if (stream != null) {
-                    try {
-                        stream.close();
-                    } catch (IOException e) {
-                        Log.w("AdvImageView", "Unable to close content: " + mUri, e);
-                    }
-                }
-            }
+            d = getDrawableFromUri(mUri);
 
             if (d == null) {
-                System.out.println("resolveUri failed on bad bitmap uri: " + mUri);
+                Log.w(LOG_TAG, "resolveUri failed on bad bitmap uri: " + mUri);
                 // Don't try again.
                 mUri = null;
             }
@@ -689,6 +683,108 @@ public class AdvImageView extends View {
         }
 
         updateDrawable(d);
+    }
+
+    private Drawable getDrawableFromUri(Uri uri) {
+        final String scheme = uri.getScheme();
+        if (ContentResolver.SCHEME_ANDROID_RESOURCE.equals(scheme)) {
+            try {
+                // Load drawable through Resources, to get the source density information
+                final OpenResourceIdResult r = getResourceId(uri);
+                return getDrawableFromId(r.r, r.id, mContext.getTheme());
+            } catch (Exception e) {
+                Log.w(LOG_TAG, "Unable to open content: " + uri, e);
+            }
+        } else if (ContentResolver.SCHEME_CONTENT.equals(scheme)
+                || ContentResolver.SCHEME_FILE.equals(scheme)) {
+            InputStream stream = null;
+            try {
+                stream = mContext.getContentResolver().openInputStream(uri);
+                return Drawable.createFromResourceStream(getResources(), null, stream, null);
+            } catch (Exception e) {
+                Log.w(LOG_TAG, "Unable to open content: " + uri, e);
+            } finally {
+                if (stream != null) {
+                    try {
+                        stream.close();
+                    } catch (IOException e) {
+                        Log.w(LOG_TAG, "Unable to close content: " + uri, e);
+                    }
+                }
+            }
+        } else {
+            return Drawable.createFromPath(uri.toString());
+        }
+        return null;
+    }
+
+    @SuppressWarnings("deprecation")
+    private static Drawable getDrawableFromId(Resources resources, @DrawableRes int id, Resources.Theme theme) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            return resources.getDrawable(id, theme);
+        } else if (Build.VERSION.SDK_INT >= 16) {
+            return resources.getDrawable(id);
+        } else {
+            // Prior to JELLY_BEAN, Resources.getDrawable() would not correctly
+            // retrieve the final configuration density when the resource ID
+            // is a reference another Drawable resource. As a workaround, try
+            // to resolve the drawable reference manually.
+            if (sTempValue == null) {
+                sTempValue = new TypedValue();
+            }
+            resources.getValue(id, sTempValue, true);
+            final int resolvedId = sTempValue.resourceId;
+            return resources.getDrawable(resolvedId);
+        }
+    }
+
+    /**
+     * A resource identified by the {@link Resources} that contains it, and a resource id.
+     */
+    private class OpenResourceIdResult {
+        public Resources r;
+        public int id;
+    }
+
+    /**
+     * Resolves an android.resource URI to a {@link Resources} and a resource id.
+     */
+    private OpenResourceIdResult getResourceId(Uri uri) throws FileNotFoundException {
+        final String authority = uri.getAuthority();
+        final Resources r;
+        if (TextUtils.isEmpty(authority)) {
+            throw new FileNotFoundException("No authority: " + uri);
+        } else {
+            try {
+                r = mContext.getPackageManager().getResourcesForApplication(authority);
+            } catch (PackageManager.NameNotFoundException ex) {
+                throw new FileNotFoundException("No package found for authority: " + uri);
+            }
+        }
+        final List<String> path = uri.getPathSegments();
+        if (path == null) {
+            throw new FileNotFoundException("No path: " + uri);
+        }
+        final int len = path.size();
+        final int id;
+        if (len == 1) {
+            try {
+                id = Integer.parseInt(path.get(0));
+            } catch (NumberFormatException e) {
+                throw new FileNotFoundException("Single path segment is not a resource ID: " + uri);
+            }
+        } else if (len == 2) {
+            id = r.getIdentifier(path.get(1), path.get(0), authority);
+        } else {
+            throw new FileNotFoundException("More than two path segments: " + uri);
+        }
+        if (id == 0) {
+            throw new FileNotFoundException("No resource found for: " + uri);
+        }
+        final OpenResourceIdResult res = new OpenResourceIdResult();
+        res.r = r;
+        res.id = id;
+        return res;
     }
 
     @Override
@@ -707,6 +803,9 @@ public class AdvImageView extends View {
         if (mDrawable != null) {
             mDrawable.setCallback(null);
             unscheduleDrawable(mDrawable);
+            if (ViewCompat.isAttachedToWindow(this)) {
+                mDrawable.setVisible(false, false);
+            }
         }
 
         mDrawable = d;
@@ -717,7 +816,9 @@ public class AdvImageView extends View {
             if (d.isStateful()) {
                 d.setState(getDrawableState());
             }
-            d.setVisible(getVisibility() == VISIBLE, true);
+            if (ViewCompat.isAttachedToWindow(this)) {
+                d.setVisible(getWindowVisibility() == VISIBLE && isShown(), true);
+            }
             d.setLevel(mLevel);
             mDrawableWidth = d.getIntrinsicWidth();
             mDrawableHeight = d.getIntrinsicHeight();
@@ -731,7 +832,7 @@ public class AdvImageView extends View {
     }
 
     private void resizeFromDrawable() {
-        Drawable d = mDrawable;
+        final Drawable d = mDrawable;
         if (d != null) {
             int w = d.getIntrinsicWidth();
             if (w < 0) w = mDrawableWidth;
@@ -812,10 +913,10 @@ public class AdvImageView extends View {
             }
         }
 
-        int pLeft = getPaddingLeft();
-        int pRight = getPaddingRight();
-        int pTop = getPaddingTop();
-        int pBottom = getPaddingBottom();
+        final int pLeft = getPaddingLeft();
+        final int pRight = getPaddingRight();
+        final int pTop = getPaddingTop();
+        final int pBottom = getPaddingBottom();
 
         int widthSize;
         int heightSize;
@@ -834,7 +935,7 @@ public class AdvImageView extends View {
 
             if (desiredAspect != INVALID_ASPECT_RATIO) {
                 // See what our actual aspect ratio is
-                float actualAspect = (float)(widthSize - pLeft - pRight) /
+                final float actualAspect = (float)(widthSize - pLeft - pRight) /
                         (heightSize - pTop - pBottom);
 
                 if (Math.abs(actualAspect - desiredAspect) > 0.0000001) {
@@ -843,7 +944,7 @@ public class AdvImageView extends View {
 
                     // Try adjusting width to be proportional to height
                     if (resizeWidth) {
-                        int newWidth = (int)(desiredAspect * (heightSize - pTop - pBottom)) +
+                        final int newWidth = (int)(desiredAspect * (heightSize - pTop - pBottom)) +
                                 pLeft + pRight;
 
                         if (isSizeAcceptable(newWidth, mMinWidth, mMaxWidth, widthMeasureSpec)) {
@@ -854,7 +955,7 @@ public class AdvImageView extends View {
 
                     // Try adjusting height to be proportional to width
                     if (!done && resizeHeight) {
-                        int newHeight = (int)((widthSize - pLeft - pRight) / desiredAspect) +
+                        final int newHeight = (int)((widthSize - pLeft - pRight) / desiredAspect) +
                                 pTop + pBottom;
 
                         if (isSizeAcceptable(newHeight, mMinHeight, mMaxHeight, heightMeasureSpec)) {
@@ -884,8 +985,8 @@ public class AdvImageView extends View {
     private int resolveAdjustedSize(int desiredSize, int minSize,
             int maxSize, int measureSpec) {
         int result = desiredSize;
-        int specMode = MeasureSpec.getMode(measureSpec);
-        int specSize =  MeasureSpec.getSize(measureSpec);
+        final int specMode = MeasureSpec.getMode(measureSpec);
+        final int specSize =  MeasureSpec.getSize(measureSpec);
         switch (specMode) {
             case MeasureSpec.UNSPECIFIED:
                 /* Parent says we can be as big as we want. Just don't be larger
@@ -908,8 +1009,8 @@ public class AdvImageView extends View {
     }
 
     private static boolean isSizeAcceptable(int size, int minSize, int maxSize, int measureSpec) {
-        int specMode = MeasureSpec.getMode(measureSpec);
-        int specSize =  MeasureSpec.getSize(measureSpec);
+        final int specMode = MeasureSpec.getMode(measureSpec);
+        final int specSize =  MeasureSpec.getSize(measureSpec);
         switch (specMode) {
             case MeasureSpec.UNSPECIFIED:
                 // Parent says we can be as big as we want. Just don't be smaller
@@ -964,13 +1065,13 @@ public class AdvImageView extends View {
             return;
         }
 
-        int dWidth = mDrawableWidth;
-        int dHeight = mDrawableHeight;
+        final int dWidth = mDrawableWidth;
+        final int dHeight = mDrawableHeight;
 
-        int vWidth = getWidth() - getPaddingLeft() - getPaddingRight();
-        int vHeight = getHeight() - getPaddingTop() - getPaddingBottom();
+        final int vWidth = getWidth() - getPaddingLeft() - getPaddingRight();
+        final int vHeight = getHeight() - getPaddingTop() - getPaddingBottom();
 
-        boolean fits = (dWidth < 0 || vWidth == dWidth) &&
+        final boolean fits = (dWidth < 0 || vWidth == dWidth) &&
                 (dHeight < 0 || vHeight == dHeight);
 
         if (dWidth <= 0 || dHeight <= 0 || mScaleType == SCALE_TYPE_FIT_XY) {
@@ -1002,7 +1103,7 @@ public class AdvImageView extends View {
             } else if (mScaleType == SCALE_TYPE_CENTER_CROP) {
                 mDrawMatrix = mMatrix;
 
-                float scale;
+                final float scale;
                 float dx = 0, dy = 0;
 
                 if (dWidth * vHeight > vWidth * dHeight) {
@@ -1017,9 +1118,9 @@ public class AdvImageView extends View {
                 mDrawMatrix.postTranslate(Math.round(dx), Math.round(dy));
             } else if (mScaleType == SCALE_TYPE_CENTER_INSIDE) {
                 mDrawMatrix = mMatrix;
-                float scale;
-                float dx;
-                float dy;
+                final float scale;
+                final float dx;
+                final float dy;
 
                 if (dWidth <= vWidth && dHeight <= vHeight) {
                     scale = 1.0f;
@@ -1047,9 +1148,10 @@ public class AdvImageView extends View {
     @Override
     protected void drawableStateChanged() {
         super.drawableStateChanged();
-        Drawable d = mDrawable;
-        if (d != null && d.isStateful()) {
-            d.setState(getDrawableState());
+        final Drawable drawable = mDrawable;
+        if (drawable != null && drawable.isStateful()
+                && drawable.setState(getDrawableState())) {
+            invalidateDrawable(drawable);
         }
     }
 
@@ -1096,7 +1198,7 @@ public class AdvImageView extends View {
         if (mDrawMatrix == null && pTop == 0 && pLeft == 0) {
             mDrawable.draw(canvas);
         } else {
-            int saveCount = canvas.getSaveCount();
+            final int saveCount = canvas.getSaveCount();
             canvas.save();
 
             if (mCropToPadding) {
