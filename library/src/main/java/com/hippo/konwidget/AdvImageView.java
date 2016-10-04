@@ -817,7 +817,7 @@ public class AdvImageView extends View {
                 d.setState(getDrawableState());
             }
             if (ViewCompat.isAttachedToWindow(this)) {
-                d.setVisible(getWindowVisibility() == VISIBLE && isShown(), true);
+                d.setVisible(getVisibility() == VISIBLE, true);
             }
             d.setLevel(mLevel);
             mDrawableWidth = d.getIntrinsicWidth();
@@ -1416,7 +1416,8 @@ public class AdvImageView extends View {
     public void setVisibility(int visibility) {
         super.setVisibility(visibility);
         if (mDrawable != null) {
-            mDrawable.setVisible(visibility == VISIBLE, false);
+            mDrawable.setVisible(
+                    ViewCompat.isAttachedToWindow(this) && visibility == VISIBLE, false);
         }
     }
 
